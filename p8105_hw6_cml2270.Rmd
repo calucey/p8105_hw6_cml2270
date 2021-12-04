@@ -11,7 +11,9 @@ editor_options:
 Only done once, the setup code loads the necessary libraries and double checks that the working directory is correct. It also sets defaults for figure size with knitr, as well as a default theme and color scale for all ggplots.
 
 ```{r setup}
+
 library(tidyverse)
+library(modelr)
 
 getwd()
 
@@ -34,19 +36,6 @@ scale_fill_discrete = scale_fill_viridis_d
 
 # Problem 1: Birthweight Data
 
-Load and clean the data for regression analysis (i.e. convert numeric to factor where appropriate, check for missing data, etc.).
-
-Propose a regression model for birthweight. This model may be based on a hypothesized structure for the factors that underlie birthweight, on a data-driven model-building process, or a combination of the two. Describe your modeling process and show a plot of model residuals against fitted values – use add_predictions and add_residuals in making this plot.
-
-Compare your model to two others:
-
-    One using length at birth and gestational age as predictors (main effects only)
-    One using head circumference, length, sex, and all interactions (including the three-way interaction) between these
-
-Make this comparison in terms of the cross-validated prediction error; use crossv_mc and functions in purrr as appropriate.
-
-Note that although we expect your model to be reasonable, model building itself is not a main idea of the course and we don’t necessarily expect your model to be “optimal”.
-
 ```{r load_clean, error = TRUE}
 
 birthweight_df =
@@ -55,13 +44,22 @@ birthweight_df =
   mutate(
     babysex = as.factor(babysex),
     malform = as.factor(malform),
-    frace = as.factor(frace, levels = c("White", "Black", "Asian", "Puerto Rican", "Other", "Uknown")),
-    frace = fct_relevel(frace, levels = c("White", "Black", "Asian", "Puerto Rican", "Other", "Uknown"))
-  )
-
-
-frace = factor(frace, levels = c("White", "Black", "Asian", "Puerto Rican", "Other", "Uknown")),
-    mrace = factor(mrace, levels = c("White", "Black", "Asian", "Puerto Rican", "Other", "Uknown"))
+    frace = as.factor(frace),
+    frace = recode_factor(frace,
+                      "1" = "White",
+                      "2" = "Black",
+                      "3" = "Asian",
+                      "4" = "Puerto Rican",
+                      "8" = "Other"),
+    mrace = as.factor(mrace),
+    mrace = recode_factor(mrace,
+                      "1" = "White",
+                      "2" = "Black",
+                      "3" = "Asian",
+                      "4" = "Puerto Rican",
+                      "8" = "Other")
+  ) %>% 
+  relocate(bwt)
 
 ```
 
@@ -69,7 +67,7 @@ frace = factor(frace, levels = c("White", "Black", "Asian", "Puerto Rican", "Oth
 
 Note that only three subjects had previously had live births, so for most subjects the `parity` variable is = 0. Similarly, no subject has a recorded previous low birthweight baby (`pnumlbw`), and no subjects have a recorded previous small for gestational age baby (`pnumgsa`).
 
-```{r error = TRUE}
+```{r eda_viz}
 
 birthweight_df %>% 
   ggplot(aes(y = bwt, x = momage)) +
@@ -87,11 +85,138 @@ birthweight_df %>%
   geom_smooth()
 
 birthweight_df %>% 
+  ggplot(aes(y = bwt, x = wtgain)) +
+  geom_point() +
+  geom_smooth()
+
+birthweight_df %>% 
   ggplot(aes(x = frace, y = bwt)) +
+  geom_boxplot()
+
+birthweight_df %>% 
+  ggplot(aes(x = mrace, y = bwt)) +
+  geom_boxplot()
+
+# seems like theres an association with gaweeks
+birthweight_df %>% 
+  ggplot(aes(y = bwt, x = gaweeks)) +
+  geom_point()
+
+birthweight_df %>% 
+  ggplot(aes(y = bwt, x = fincome)) +
+  geom_point() +
+  geom_smooth()
+
+# surprisingly weak association between n cigarettes and bwt
+birthweight_df %>% 
+  ggplot(aes(y = bwt, x = smoken)) +
+  geom_point() +
+  geom_smooth()
+
+# definitely going to include baby length
+birthweight_df %>% 
+  ggplot(aes(y = bwt, x = blength)) +
+  geom_point() +
+  geom_smooth()
+
+# big head babies bigger
+birthweight_df %>% 
+  ggplot(aes(y = bwt, x = bhead)) +
+  geom_point() +
+  geom_smooth()
+
+birthweight_df %>% 
+  ggplot(aes(y = bwt, x = babysex)) +
+  geom_point() +
+  geom_smooth()
+
+```
+
+Based on my exploratory analysis of the relationship between birthweight and the different recorded variables, I will build a model in which weight at birth depends on the size of the baby's head (`bhead`), the length of the baby (`blength`), and the gestational age in weeks (`gaweeks`), as there seems to be some sort of linear relationship between birthweight and variable.
+
+
+```{r build_linear_mod}
+
+model_one = 
+  lm(bwt ~ bhead + blength + gaweeks, data = birthweight_df)
+
+summary(model_one)
+
+model_one %>% 
+  broom::tidy() %>% 
+  knitr::kable()
+
+# plot predicted / fitted values against residuals
+
+birthweight_df %>% 
+  add_predictions(model_one) %>% 
+  add_residuals(model_one) %>% 
+  ggplot(aes(x = resid, y = pred)) + 
+  geom_point()
+
+```
+
+#### Defining Alternative Models
+
+```{r alt_models}
+
+alt_model_one =
+  lm(bwt ~ blength + gaweeks, data = birthweight_df)
+
+alt_model_two = 
+  lm(bwt ~ bhead + blength + babysex + bhead*blength + blength*babysex + bhead*babysex + bhead*blength*babysex, data = birthweight_df)
+
+```
+
+#### Cross Validation of the Three Models
+
+
+```{r validate_mods}
+
+print(rmse(model_one, birthweight_df))
+print(rmse(alt_model_one, birthweight_df))
+print(rmse(alt_model_two, birthweight_df))
+
+```
+
+Cross validate the three models:
+
+```{r cv}
+
+bwt_cv_df =
+  crossv_mc(birthweight_df, 1000) %>% 
+  mutate(
+    train = map(train, as_tibble),
+    test = map(test, as_tibble)
+  )
+
+bwt_cv_df =
+  bwt_cv_df %>% 
+  mutate(
+    model_one = map(.x = train, ~lm(bwt ~ bhead + blength + gaweeks, data = .x)),
+    alt_model_one = map(.x = train, ~lm(bwt ~ blength + gaweeks, data = .x)),
+    alt_model_two = map(.x = train, ~lm(bwt ~ bhead + blength + babysex + bhead*blength + blength*babysex + bhead*babysex + bhead*blength*babysex, data = .x))
+  ) %>% 
+  mutate(
+    rmse_model_one = map2_dbl(.x = model_one, .y = test, ~rmse(model = .x, data = .y)),
+    rmse_alt_one = map2_dbl(.x = alt_model_one, .y = test, ~rmse(model = .x, data = .y)),
+    rmse_alt_two = map2_dbl(.x = alt_model_two, .y = test, ~rmse(model = .x, data = .y))
+  )
+
+bwt_cv_df %>% 
+  select(starts_with("rmse")) %>% 
+  pivot_longer(
+    rmse_model_one:rmse_alt_two,
+    names_to = "model",
+    values_to = "rmse",
+    names_prefix = "rmse_"
+  ) %>% 
+  ggplot(aes(x = model, y = rmse)) +
   geom_boxplot()
 
 ```
 
+Based on the root mean squared estimates of the raw models as well as the root mean squared estimates generated by cross validation, the first model, which regresses birthweight on `bhead`, `blength`, and `gaweeks`, is the best fit. However, model_one, my proposed model, and the second alternative model (which regresses on `bhead`, `blength`, and `babysex` in place of `gaweeks`) have very similar RMSE values and are likely similarly good models.
 
 # Problem 2: Bootstrap Central Park Data
 
